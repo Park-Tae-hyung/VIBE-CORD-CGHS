@@ -82,7 +82,7 @@ section{position:relative;padding:110px 24px}
 .searchbox{display:flex;justify-content:center;margin-top:36px}
 .searchbox input{width:min(460px,90%);padding:15px 24px;border-radius:999px;border:1px solid rgba(124,58,237,.4);background:rgba(21,11,46,.8);color:var(--text);font-size:15px;font-family:inherit;outline:none;transition:.25s}
 .searchbox input:focus{border-color:var(--cyan);box-shadow:0 0 0 4px rgba(34,211,238,.15)}
-.empty-msg{text-align:center;color:var(--dim);padding:60px 0;font-size:15px;grid-column:1/-1}
+.empty-msg{text-align:center;color:var(--dim);padding:60px 0;font-size:15px;grid-column:1/-1;line-height:1.9}
 
 /* ---------- VIEWER ---------- */
 .viewer{position:fixed;inset:0;z-index:1000;background:#000;display:none;flex-direction:column}
@@ -188,7 +188,7 @@ footer p{color:var(--dim);font-size:13.5px;margin-top:12px;line-height:1.8}
 
 <footer>
   <div class="logo">천안여자고등학교</div>
-  <p>바이브 코딩 웹 크리에이터 프로그램 — AI 융합 디지털 창작 프로젝트<br>상상을 코드로 잇는 우리들의 이야기 · made with 💗</p>
+  <p>바이브 코딩 웹 크리에이터 프로그램 — AI 융합 디지털 창작 프로젝트<br>상상을 코드로 잇는 우리들의 이야기 · made with 💗 · v5.0</p>
 </footer>
 
 <!-- FULLSCREEN VIEWER -->
@@ -238,63 +238,97 @@ const BG_RANK    = 'https://d8j0ntlcm91z4.cloudfront.net/user_3FbbP9nGEx1ZGPmwNv
 const MAX_HEARTS = 10, TOP_N = 20;
 
 /* ================= STATE ================= */
-firebase.initializeApp({ databaseURL: DB_URL });
-const db = firebase.database();
+let db = null;           // Firebase 실패 시에도 사이트가 동작하도록 null 허용
 let works = [];          // {id,name,display,title}
 let likes = {};          // fileId -> count
 let myLikes = {};        // fileId -> true
 let user = null;         // {uid,name,role}
 const htmlCache = {};
 let pendingLike = null;
+/* 모바일 감지: 폰에서는 카드 안 실시간 미리보기를 끄고(스크롤 튕김·과부하 방지) 터치 시 바로 실행 */
+const IS_MOBILE = window.matchMedia('(pointer:coarse)').matches || window.innerWidth < 821;
 
-/* ================= BACKGROUNDS ================= */
+/* ================= BACKGROUNDS (요소가 없어도 죽지 않게 가드) ================= */
 (function(){
-  const v = document.getElementById('heroVideo');
-  if (HERO_VIDEO.startsWith('http')) { v.src = HERO_VIDEO; }
-  else { v.remove(); document.querySelector('.hero').style.background = 'radial-gradient(ellipse at 30% 20%, #2a1758, transparent 55%), radial-gradient(ellipse at 75% 70%, #12345a, transparent 55%), #070312'; }
-  if (BG_ABOUT.startsWith('http')) document.getElementById('bgAbout').style.backgroundImage = `url('${BG_ABOUT}')`;
-  if (BG_RANK.startsWith('http'))  document.getElementById('bgRank').style.backgroundImage  = `url('${BG_RANK}')`;
+  try{
+    const v = document.getElementById('heroVideo');
+    if (v && HERO_VIDEO.startsWith('http')) v.src = HERO_VIDEO;
+    const a = document.getElementById('bgAbout');
+    if (a && BG_ABOUT.startsWith('http')) a.style.backgroundImage = `url('${BG_ABOUT}')`;
+    const r = document.getElementById('bgRank');
+    if (r && BG_RANK.startsWith('http')) r.style.backgroundImage = `url('${BG_RANK}')`;
+  }catch(e){ console.error('배경 설정 실패:', e); }
+})();
+
+/* ================= FIREBASE (차단·실패 시 로컬 모드로 계속 동작) ================= */
+(function(){
+  try{
+    if (typeof firebase !== 'undefined'){
+      firebase.initializeApp({ databaseURL: DB_URL });
+      db = firebase.database();
+    }
+  }catch(e){ console.error('Firebase 초기화 실패 → 로컬 모드:', e); db = null; }
+  if (db){
+    db.ref('likes').on('value', snap => {
+      likes = snap.val() || {};
+      refreshLikeCounts();
+      renderRankIfChanged();          /* 순위가 실제로 바뀔 때만 다시 그림 (스크롤 튕김 방지) */
+    });
+  } else {
+    likes   = JSON.parse(localStorage.getItem('localLikes')   || '{}');
+    myLikes = JSON.parse(localStorage.getItem('localMyLikes') || '{}');
+  }
 })();
 
 /* ================= DRIVE ================= */
 async function loadWorks(){
-  const q = encodeURIComponent(`'${FOLDER_ID}' in parents and trashed=false and mimeType='text/html'`);
-  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&pageSize=1000&orderBy=name&key=${DRIVE_KEY}`;
+  /* mimeType 필터를 걸지 않고 확장자로 거른다 (형식이 어긋난 파일도 수용) */
+  const q = encodeURIComponent(`'${FOLDER_ID}' in parents and trashed=false`);
+  const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType)&pageSize=1000&orderBy=name&key=${DRIVE_KEY}`;
   const r = await fetch(url);
-  if (!r.ok) throw new Error('drive');
-  const j = await r.json();
-  works = (j.files||[]).map(f=>{
-    const disp = f.name.replace(/\.html?$/i,'').trim();
-    return { id:f.id, name:f.name, display:disp, title:null };
-  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+  works = (j.files || [])
+    .filter(f => /\.html?$/i.test(f.name || '') || String(f.mimeType || '').toLowerCase().includes('html'))
+    .map(f => {
+      const disp = f.name.replace(/\.html?$/i, '').trim();
+      return { id: f.id, name: f.name, display: disp, title: null };
+    });
+  if (!works.length) throw new Error('폴더 안에서 HTML 파일을 찾지 못했어요 (하위 폴더 속 파일은 표시되지 않습니다)');
   renderFeed(); renderRank();
   loadTitles();
 }
 async function fetchHtml(id){
   if (htmlCache[id]) return htmlCache[id];
   const r = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media&key=${DRIVE_KEY}`);
-  if (!r.ok) throw new Error('file');
+  if (!r.ok) throw new Error('file ' + r.status);
   const t = await r.text();
   htmlCache[id] = t;
   return t;
 }
-/* fetch each work's <title> so the card shows the web's own name */
-function loadTitles(){
-  works.forEach(async w=>{
-    try{
-      const html = await fetchHtml(w.id);
-      const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-      let t = m ? m[1].replace(/\s+/g,' ').trim() : '';
-      const ta = document.createElement('textarea'); ta.innerHTML = t; t = ta.value; // decode entities
-      if(t){
-        w.title = t;
-        document.querySelectorAll(`.work[data-id="${w.id}"]`).forEach(el=>{
-          el.querySelector('.name').textContent = t;
-          el.querySelector('.sub').textContent = '🎒 ' + w.display;
-        });
-      }
-    }catch(e){}
+/* 각 작품의 <title>(웹앱 이름)을 가져와 카드 제목으로 표시 — 동시에 6개씩만 받아 과부하 방지 */
+async function loadTitles(){
+  const queue = [...works];
+  const applyTitle = (w, html) => {
+    const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    let t = m ? m[1].replace(/\s+/g, ' ').trim() : '';
+    const ta = document.createElement('textarea'); ta.innerHTML = t; t = ta.value;
+    if (t){
+      w.title = t;
+      document.querySelectorAll(`.work[data-id="${w.id}"]`).forEach(el => {
+        const n = el.querySelector('.name'), s = el.querySelector('.sub');
+        if (n) n.textContent = t;
+        if (s) s.textContent = '🎒 ' + w.display;
+      });
+    }
+  };
+  const workers = Array.from({ length: 6 }, async () => {
+    while (queue.length){
+      const w = queue.shift();
+      try{ applyTitle(w, await fetchHtml(w.id)); }catch(e){}
+    }
   });
+  await Promise.all(workers);
 }
 
 /* ================= RENDER ================= */
@@ -305,7 +339,7 @@ function cardHTML(w, rank){
   return `<div class="work" data-id="${w.id}">
     ${badge}
     <div class="thumb" data-thumb="${w.id}">
-      <div class="ph"><div class="big">${initials(w.display)}</div>미리보기 준비 중...</div>
+      <div class="ph"><div class="big">${initials(w.display)}</div>${IS_MOBILE ? '▶ 터치해서 실행' : '미리보기 준비 중...'}</div>
       <div class="play"><span>▶</span></div>
     </div>
     <div class="meta">
@@ -315,6 +349,15 @@ function cardHTML(w, rank){
       </button>
     </div></div>`;
 }
+function refreshLikeCounts(){
+  document.querySelectorAll('[data-like]').forEach(b => {
+    const id = b.dataset.like;
+    const cnt = b.querySelector('.cnt'), hrt = b.querySelector('.hrt');
+    if (cnt) cnt.textContent = likes[id]||0;
+    b.classList.toggle('liked', !!myLikes[id]);
+    if (hrt) hrt.textContent = myLikes[id] ? '💗' : '🤍';
+  });
+}
 function renderFeed(){
   const g = document.getElementById('feedGrid');
   const kw = (document.getElementById('search').value||'').trim().toLowerCase();
@@ -322,12 +365,19 @@ function renderFeed(){
   g.innerHTML = list.length ? list.map(w=>cardHTML(w)).join('') : `<div class="empty-msg">검색 결과가 없어요 🥲</div>`;
   bindCards(g); observeThumbs(g);
 }
+let lastRankKey = '';
 function renderRank(){
   const g = document.getElementById('rankGrid');
   const ranked = [...works].sort((a,b)=>(likes[b.id]||0)-(likes[a.id]||0)).slice(0,TOP_N);
   if(!ranked.length){ g.innerHTML = `<div class="empty-msg">아직 작품이 없어요</div>`; return; }
+  lastRankKey = ranked.map(w=>w.id).join(',');
   g.innerHTML = ranked.map((w,i)=>cardHTML(w,i+1)).join('');
   bindCards(g); observeThumbs(g);
+}
+/* 순위 순서가 그대로면 카드(iframe)를 다시 만들지 않고 숫자만 갱신 */
+function renderRankIfChanged(){
+  const key = [...works].sort((a,b)=>(likes[b.id]||0)-(likes[a.id]||0)).slice(0,TOP_N).map(w=>w.id).join(',');
+  if(key !== lastRankKey) renderRank();
 }
 function bindCards(root){
   root.querySelectorAll('.work').forEach(el=>{
@@ -342,12 +392,16 @@ const io = new IntersectionObserver(es=>{
     mountPreview(e.target);
   });
 },{rootMargin:'200px'});
-function observeThumbs(root){ root.querySelectorAll('[data-thumb]').forEach(t=>io.observe(t)); }
+function observeThumbs(root){
+  if(IS_MOBILE) return;                 /* 모바일: 미리보기 iframe 미장착 → 스크롤 튕김 방지 */
+  root.querySelectorAll('[data-thumb]').forEach(t=>io.observe(t));
+}
 async function mountPreview(t){
+  if(IS_MOBILE) return;
   try{
     const html = await fetchHtml(t.dataset.thumb);
     const f = document.createElement('iframe');
-    f.setAttribute('sandbox','allow-scripts');
+    f.setAttribute('sandbox','allow-scripts allow-same-origin');
     f.setAttribute('scrolling','no'); f.setAttribute('tabindex','-1');
     f.srcdoc = html;
     const fit = ()=>{ const s = t.clientWidth/1280; f.style.transform = `scale(${s})`; };
@@ -362,20 +416,30 @@ async function openViewer(id){
   const v = document.getElementById('viewer');
   document.getElementById('viewerTitle').textContent = '🖥️ ' + (w.title||w.display) + (w.title ? ' — ' + w.display : '');
   document.getElementById('viewerLoading').style.display = 'flex';
+  document.getElementById('viewerLoading').innerHTML = '<div class="spin"></div>';
   v.classList.add('open'); document.body.style.overflow = 'hidden';
+  const f = document.getElementById('viewerFrame');
   try{
     const html = await fetchHtml(id);
-    const f = document.getElementById('viewerFrame');
     f.srcdoc = html;
-    f.onload = ()=> document.getElementById('viewerLoading').style.display = 'none';
+    f.onload = ()=>{ document.getElementById('viewerLoading').style.display = 'none'; try{ f.contentWindow.focus(); }catch(e){} };
     setTimeout(()=>document.getElementById('viewerLoading').style.display='none', 4000);
   }catch(e){
-    document.getElementById('viewerLoading').innerHTML = '⚠️ 작품을 불러오지 못했어요. 드라이브 공유 설정을 확인해 주세요.';
+    /* fetch가 막힌 환경 대비: 드라이브에서 iframe이 직접 열도록 폴백 */
+    f.onload = ()=>{ document.getElementById('viewerLoading').style.display = 'none'; try{ f.contentWindow.focus(); }catch(_){} };
+    f.src = `https://www.googleapis.com/drive/v3/files/${id}?alt=media&key=${DRIVE_KEY}`;
+    setTimeout(()=>{
+      if(document.getElementById('viewerLoading').style.display !== 'none'){
+        document.getElementById('viewerLoading').innerHTML = '⚠️ 작품을 불러오지 못했어요. 드라이브 공유 설정(링크가 있는 모든 사용자)을 확인해 주세요.';
+      }
+    }, 6000);
   }
 }
 function closeViewer(){
   document.getElementById('viewer').classList.remove('open');
-  document.getElementById('viewerFrame').srcdoc = '';
+  const f = document.getElementById('viewerFrame');
+  f.srcdoc = '';
+  if(f.getAttribute('src')) f.src = 'about:blank';
   document.body.style.overflow = '';
   if(document.fullscreenElement) document.exitFullscreen().catch(()=>{});
 }
@@ -385,24 +449,22 @@ function viewerFullscreen(){
 }
 document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeViewer(); });
 
-/* ================= LIKES (Firebase) ================= */
+/* ================= LIKES ================= */
 const safeKey = s => s.replace(/[.#$\[\]\/\s]/g,'_');
-db.ref('likes').on('value', snap=>{
-  likes = snap.val()||{};
-  document.querySelectorAll('[data-like]').forEach(b=>{
-    const id = b.dataset.like;
-    b.querySelector('.cnt').textContent = likes[id]||0;
-  });
-  renderRank();
-});
+function saveLocal(){
+  localStorage.setItem('localLikes', JSON.stringify(likes));
+  localStorage.setItem('localMyLikes', JSON.stringify(myLikes));
+}
 function watchMyLikes(){
+  if(!db){ updateHud(); refreshLikeCounts(); return; }
   db.ref('users/'+user.uid+'/likes').on('value', snap=>{
     myLikes = snap.val()||{};
-    updateHud(); renderFeed(); renderRank();
+    updateHud(); refreshLikeCounts();
   });
 }
 function usedHearts(){ return Object.keys(myLikes).length; }
 function updateHud(){
+  if(!user) return;
   const left = MAX_HEARTS - usedHearts();
   document.getElementById('hud').innerHTML =
     `<span class="hearts">💗 남은 하트 ${left}/${MAX_HEARTS}</span><span style="color:var(--dim);font-weight:500">· ${user.name}</span>`;
@@ -411,6 +473,13 @@ async function toggleLike(id){
   if(!user){ pendingLike = id; openReg(); return; }
   const liked = !!myLikes[id];
   if(!liked && usedHearts() >= MAX_HEARTS){ toast('하트를 모두 사용했어요! 다른 작품의 하트를 취소하면 돌아와요 ↩️'); return; }
+  if(!db){
+    /* 로컬 모드 */
+    if(liked){ delete myLikes[id]; likes[id] = Math.max(0,(likes[id]||0)-1); toast('하트를 취소했어요. 하트 1개가 돌아왔습니다 ↩️'); }
+    else { myLikes[id] = true; likes[id] = (likes[id]||0)+1; toast('💗 하트를 보냈어요!'); }
+    saveLocal(); refreshLikeCounts(); renderRankIfChanged(); updateHud();
+    return;
+  }
   const uref = db.ref(`users/${user.uid}/likes/${id}`);
   const cref = db.ref(`likes/${id}`);
   if(liked){
@@ -445,9 +514,11 @@ async function register(){
   if(!name || name.length < 2){ err.textContent = '이름을 정확히 입력해 주세요.'; return; }
   err.textContent = '';
   user = { uid: safeKey(role==='student' ? sid+'_'+name : 't_'+name), name, role };
-  try{
-    await db.ref('users/'+user.uid+'/info').update({ name, role, sid: role==='student'?sid:null, last: Date.now() });
-  }catch(e){ err.textContent = '저장 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.'; user=null; return; }
+  if(db){
+    try{
+      await db.ref('users/'+user.uid+'/info').update({ name, role, sid: role==='student'?sid:null, last: Date.now() });
+    }catch(e){ err.textContent = '저장 중 오류가 발생했어요. 잠시 후 다시 시도해 주세요.'; user=null; return; }
+  }
   localStorage.setItem('vibeUser', JSON.stringify(user));
   document.getElementById('regModal').classList.remove('open');
   watchMyLikes();
@@ -471,9 +542,16 @@ document.getElementById('search').addEventListener('input', renderFeed);
     const saved = localStorage.getItem('vibeUser');
     if(saved){ user = JSON.parse(saved); watchMyLikes(); }
   }catch(e){}
-  loadWorks().catch(()=>{
+  loadWorks().catch(e=>{
+    console.error('드라이브 연동 실패:', e);
+    const msg = String(e && e.message || e).replace(/</g,'&lt;');
     document.getElementById('feedGrid').innerHTML =
-      '<div class="empty-msg">⚠️ 구글 드라이브에서 작품을 불러오지 못했어요.<br>폴더 공유 설정(링크가 있는 모든 사용자)과 API 키를 확인해 주세요.</div>';
+      `<div class="empty-msg">⚠️ 구글 드라이브에서 작품을 불러오지 못했어요.<br>
+       <b style="color:#fb7185">원인: ${msg}</b><br><br>
+       ① 폴더가 <b>링크가 있는 모든 사용자 – 뷰어</b>로 공유되어 있는지<br>
+       ② 접속한 네트워크에서 googleapis.com이 차단되지 않았는지 확인해 주세요.<br>
+       (새로고침: Ctrl+Shift+R)</div>`;
+    document.getElementById('rankGrid').innerHTML = `<div class="empty-msg">작품을 불러오지 못했어요</div>`;
   });
 })();
 </script>
