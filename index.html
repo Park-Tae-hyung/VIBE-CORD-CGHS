@@ -188,7 +188,7 @@ footer p{color:var(--dim);font-size:13.5px;margin-top:12px;line-height:1.8}
 
 <footer>
   <div class="logo">천안여자고등학교</div>
-  <p>바이브 코딩 웹 크리에이터 프로그램 — AI 융합 디지털 창작 프로젝트<br>상상을 코드로 잇는 우리들의 이야기 · made with 💗 · v5.0</p>
+  <p>바이브 코딩 웹 크리에이터 프로그램 — AI 융합 디지털 창작 프로젝트<br>상상을 코드로 잇는 우리들의 이야기 · made with 💗 · v5.1</p>
 </footer>
 
 <!-- FULLSCREEN VIEWER -->
@@ -401,7 +401,8 @@ async function mountPreview(t){
   try{
     const html = await fetchHtml(t.dataset.thumb);
     const f = document.createElement('iframe');
-    f.setAttribute('sandbox','allow-scripts allow-same-origin');
+    /* 미리보기는 스크립트 실행 차단(디자인만 표시) — 일부 작품의 무한루프가 사이트 전체를 멈추는 것 방지 */
+    f.setAttribute('sandbox','');
     f.setAttribute('scrolling','no'); f.setAttribute('tabindex','-1');
     f.srcdoc = html;
     const fit = ()=>{ const s = t.clientWidth/1280; f.style.transform = `scale(${s})`; };
